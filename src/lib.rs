@@ -50,8 +50,8 @@ impl PipeStream {
 
 impl Drop for PipeStream {
     fn drop(&mut self) {
+        let _ = unsafe { FlushFileBuffers(self.handle.inner) };
         if self.server_half {
-            let _ = unsafe { FlushFileBuffers(self.handle.inner) };
             let _ = unsafe { DisconnectNamedPipe(self.handle.inner) };
         }
     }
@@ -111,10 +111,11 @@ impl Write for PipeStream {
 
 pub struct PipeListener<'a> {
     path: Cow<'a, Path>,
+    next_pipe: Handle,
 }
 
 impl<'a> PipeListener<'a> {
-    fn create_pipe(path: &Path, first: bool) -> io::Result<HANDLE> {
+    fn create_pipe(path: &Path, first: bool) -> io::Result<Handle> {
         let mut os_str: OsString = path.as_os_str().into();
         os_str.push("\x00");
         let u16_slice = os_str.encode_wide().collect::<Vec<u16>>();
@@ -135,14 +136,14 @@ impl<'a> PipeListener<'a> {
         };
 
         if handle != INVALID_HANDLE_VALUE {
-            Ok(handle)
+            Ok(Handle { inner: handle })
         } else {
             Err(io::Error::last_os_error())
         }
     }
 
-    fn connect_pipe(handle: HANDLE) -> io::Result<()> {
-        let result = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+    fn connect_pipe(handle: &Handle) -> io::Result<()> {
+        let result = unsafe { ConnectNamedPipe(handle.inner, std::ptr::null_mut()) };
 
         if result != 0 {
             Ok(())
@@ -158,39 +159,45 @@ impl<'a> PipeListener<'a> {
     pub fn bind<P: Into<Cow<'a, Path>>>(path: P) -> io::Result<Self> {
         let path = path.into();
         let handle = PipeListener::create_pipe(&path, true)?;
-        let _ = unsafe { DisconnectNamedPipe(handle) };
-        Ok(PipeListener { path: path })
+        Ok(PipeListener {
+            path: path,
+            next_pipe: handle,
+        })
     }
 
-    pub fn accept(&self) -> io::Result<PipeStream> {
-        let handle = PipeListener::create_pipe(&self.path, false)?;
-        PipeListener::connect_pipe(handle)?;
+    pub fn accept(&mut self) -> io::Result<PipeStream> {
+        let handle = std::mem::replace(&mut self.next_pipe,
+                                       PipeListener::create_pipe(&self.path, false)?);
+
+        PipeListener::connect_pipe(&handle)?;
 
         Ok(PipeStream {
-            handle: Handle { inner: handle },
+            handle: handle,
             server_half: true,
         })
     }
 
-    pub fn incoming(&self) -> Incoming {
+    pub fn incoming<'b>(&'b mut self) -> Incoming<'b, 'a> {
         Incoming { listener: self }
     }
 }
 
-pub struct Incoming<'a> {
-    listener: &'a PipeListener<'a>,
+pub struct Incoming<'a, 'b>
+    where 'b: 'a
+{
+    listener: &'a mut PipeListener<'b>,
 }
 
-impl<'a> IntoIterator for &'a PipeListener<'a> {
+impl<'a, 'b> IntoIterator for &'a mut PipeListener<'b> {
     type Item = io::Result<PipeStream>;
-    type IntoIter = Incoming<'a>;
+    type IntoIter = Incoming<'a, 'b>;
 
-    fn into_iter(self) -> Incoming<'a> {
+    fn into_iter(self) -> Incoming<'a, 'b> {
         self.incoming()
     }
 }
 
-impl<'a> Iterator for Incoming<'a> {
+impl<'a, 'b> Iterator for Incoming<'a, 'b> {
     type Item = io::Result<PipeStream>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -207,7 +214,9 @@ mod test {
         ($e:expr) => {
             match $e {
                 Ok(e) => e,
-                Err(e) => panic!("{}", e),
+                Err(e) => {
+                    panic!("{}", e);
+                },
             }
         }
     }
@@ -219,7 +228,7 @@ mod test {
         let msg1 = b"hello";
         let msg2 = b"world!";
 
-        let listener = or_panic!(PipeListener::bind(socket_path));
+        let mut listener = or_panic!(PipeListener::bind(socket_path));
         let thread = thread::spawn(move || {
             let mut stream = or_panic!(listener.accept());
             let mut buf = [0; 5];
@@ -228,7 +237,7 @@ mod test {
             or_panic!(stream.write_all(msg2));
         });
 
-        let mut stream = or_panic!(PipeStream::connect(&socket_path));
+        let mut stream = or_panic!(PipeStream::connect(socket_path));
 
         or_panic!(stream.write_all(msg1));
         let mut buf = vec![];
@@ -243,7 +252,7 @@ mod test {
     fn iter() {
         let socket_path = Path::new("//./pipe/itersock");
 
-        let listener = PipeListener::bind(socket_path).unwrap();
+        let mut listener = or_panic!(PipeListener::bind(socket_path));
         let thread = thread::spawn(move || for stream in listener.incoming().take(2) {
             let mut stream = or_panic!(stream);
             let mut buf = [0];
@@ -251,7 +260,7 @@ mod test {
         });
 
         for _ in 0..2 {
-            let mut stream = or_panic!(PipeStream::connect(&socket_path));
+            let mut stream = or_panic!(PipeStream::connect(socket_path));
             or_panic!(stream.write_all(&[0]));
         }
 
