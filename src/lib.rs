@@ -7,10 +7,11 @@ use kernel32::*;
 use winapi::*;
 use std::borrow::Cow;
 use std::io::{self, Read, Write};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::prelude::*;
 use std::path::Path;
 use std::ffi::OsString;
 
+#[derive(Debug)]
 pub struct PipeStream {
     server_half: bool,
     handle: Handle,
@@ -111,6 +112,28 @@ impl Write for PipeStream {
     }
 }
 
+impl AsRawHandle for PipeStream {
+    fn as_raw_handle(&self) -> RawHandle {
+        self.handle.inner
+    }
+}
+
+impl IntoRawHandle for PipeStream {
+    fn into_raw_handle(self) -> RawHandle {
+        self.handle.inner
+    }
+}
+
+impl FromRawHandle for PipeStream {
+    unsafe fn from_raw_handle(handle: RawHandle) -> Self {
+        PipeStream {
+            handle: Handle { inner: handle },
+            server_half: false,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct PipeListener<'a> {
     path: Cow<'a, Path>,
     next_pipe: Handle,
@@ -270,6 +293,7 @@ mod test {
     }
 }
 
+#[derive(Debug)]
 struct Handle {
     inner: HANDLE,
 }
