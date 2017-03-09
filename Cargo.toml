@@ -1,8 +1,19 @@
 [package]
 name = "windows-named-pipe"
 version = "0.1.0"
+license = "BSD 2-Clause"
 authors = ["Daniel Griffen <daniel@griffen.io>"]
+keywords = ["windows", "pipe", "named"]
+documentation = "https://docs.rs/windows-named-pipe"
+repository = "https://gitlab.com/dgriffen/windows-named-pipe"
+categories = ["api-bindings"]
+description = """
+Windows named pipes with a unix-socket like interface
+"""
+
+[badges]
+appveyor = { repository = "dgriffen/windows-named-pipe" }
 
 [dependencies]
-kernel32-sys = "*"
-winapi = "*"
+kernel32-sys = "0.2"
+winapi = "0.2"
