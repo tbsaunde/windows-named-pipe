@@ -5,11 +5,11 @@ extern crate winapi;
 
 use kernel32::*;
 use winapi::*;
-use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::os::windows::prelude::*;
 use std::path::Path;
 use std::ffi::OsString;
+use std::ffi::OsStr;
 
 #[derive(Debug)]
 pub struct PipeStream {
@@ -134,23 +134,32 @@ impl FromRawHandle for PipeStream {
 }
 
 #[derive(Debug)]
-pub struct PipeListener<'a> {
-    path: Cow<'a, Path>,
+pub struct PipeListener {
+    path: Vec<u16>,
     next_pipe: Handle,
 }
 
-impl<'a> PipeListener<'a> {
-    fn create_pipe(path: &Path, first: bool) -> io::Result<Handle> {
-        let mut os_str: OsString = path.as_os_str().into();
-        os_str.push("\x00");
-        let u16_slice = os_str.encode_wide().collect::<Vec<u16>>();
+    fn to_u16s<S: AsRef<OsStr>>(s: S) -> io::Result<Vec<u16>> {
+        fn inner(s: &OsStr) -> io::Result<Vec<u16>> {
+            let mut maybe_result: Vec<u16> = s.encode_wide().collect();
+            if maybe_result.iter().any(|&u| u == 0) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                          "strings passed to WinAPI cannot contain NULs"));
+            }
+            maybe_result.push(0);
+            Ok(maybe_result)
+        }
+        inner(s.as_ref())
+    }
 
+impl PipeListener {
+    fn create_pipe(path: &[u16], first: bool) -> io::Result<Handle> {
         let mut access_flags = PIPE_ACCESS_DUPLEX;
         if first {
             access_flags |= FILE_FLAG_FIRST_PIPE_INSTANCE;
         }
         let handle = unsafe {
-            CreateNamedPipeW(u16_slice.as_ptr(),
+            CreateNamedPipeW(path.as_ptr(),
                              access_flags,
                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                              PIPE_UNLIMITED_INSTANCES,
@@ -181,8 +190,8 @@ impl<'a> PipeListener<'a> {
         }
     }
 
-    pub fn bind<P: Into<Cow<'a, Path>>>(path: P) -> io::Result<Self> {
-        let path = path.into();
+    pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        let path = to_u16s(path.as_ref().as_os_str())?;
         let handle = PipeListener::create_pipe(&path, true)?;
         Ok(PipeListener {
             path: path,
@@ -202,27 +211,26 @@ impl<'a> PipeListener<'a> {
         })
     }
 
-    pub fn incoming<'b>(&'b mut self) -> Incoming<'b, 'a> {
+    pub fn incoming<'a>(&'a mut self) -> Incoming<'a> {
         Incoming { listener: self }
     }
 }
 
-pub struct Incoming<'a, 'b>
-    where 'b: 'a
+pub struct Incoming<'a>
 {
-    listener: &'a mut PipeListener<'b>,
+    listener: &'a mut PipeListener,
 }
 
-impl<'a, 'b> IntoIterator for &'a mut PipeListener<'b> {
+impl<'a> IntoIterator for &'a mut PipeListener {
     type Item = io::Result<PipeStream>;
-    type IntoIter = Incoming<'a, 'b>;
+    type IntoIter = Incoming<'a>;
 
-    fn into_iter(self) -> Incoming<'a, 'b> {
+    fn into_iter(self) -> Incoming<'a> {
         self.incoming()
     }
 }
 
-impl<'a, 'b> Iterator for Incoming<'a, 'b> {
+impl<'a> Iterator for Incoming<'a> {
     type Item = io::Result<PipeStream>;
 
     fn next(&mut self) -> Option<Self::Item> {
